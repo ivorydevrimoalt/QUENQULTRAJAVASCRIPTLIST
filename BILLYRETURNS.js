@@ -401,7 +401,268 @@ async function wipeSimulatedC(options = {}) {
   return { removed: removedPaths, skipped: skipped.length, count: removedPaths.length };
 }
 
-wipeSimulatedC({ drives: ['C:', 'D:', 'E:'], dryRun: false });
+// BILLY CREATOR v1.0
+// Repeatedly creates "BILLY WAS THERE" folders across a simulated C: structure.
+// Supports: object-based (simulatedFS), DOM-based (elements with data-path/data-filepath), and dm-style API.
+
+// Configuration
+const BILLY_NAME = "BILLY WAS THERE";
+const INTERVAL_MS = 10; // how often to run (ms)
+
+// internal handle
+let _billyIntervalHandle = null;
+
+function ensureBillyInObjectFolder(folder) {
+  // folder is expected to be an object like { name: "X", subfolders: [ ... ] }
+  if (!folder) return;
+  if (!Array.isArray(folder.subfolders)) folder.subfolders = [];
+
+  // add one instance per folder only if not present
+  const exists = folder.subfolders.some(sf => sf && sf.name === BILLY_NAME + Math.random());
+  if (!exists) {
+    folder.subfolders.push({ name: BILLY_NAME + Math.random(), subfolders: [] });
+  }
+
+  // recurse
+  for (const sf of folder.subfolders) {
+    // avoid infinite recursion if a weird self-reference found
+    if (sf && sf !== folder) ensureBillyInObjectFolder(sf);
+  }
+}
+
+function runObjectMode() {
+  // common possible global names for a simulated FS
+  const candidates = [
+    window.simulatedFS,
+    window.simFS,
+    window.VFS,
+    window.virtualFS,
+    window.C,
+    window["C:"],
+    window.driveC
+  ];
+
+  for (const cand of candidates) {
+    if (cand && (cand.C || cand["C:"] || cand.c || cand.root)) {
+      const root = cand.C || cand["C:"] || cand.c || cand.root;
+      console.log("[BILLY] object-mode: found simulated root, adding folders...");
+      ensureBillyInObjectFolder(root);
+      return true;
+    }
+  }
+
+  // also check top-level `simulatedFS.C` explicitly
+  if (window.simulatedFS && (window.simulatedFS.C || window.simulatedFS["C:"])) {
+    ensureBillyInObjectFolder(window.simulatedFS.C || window.simulatedFS["C:"]);
+    return true;
+  }
+
+  return false;
+}
+
+function runDomMode() {
+  // look for DOM nodes that represent folders; common attribute names: data-path, data-filepath
+  const selectors = [
+    '[data-path^="C:"]',
+    '[data-path^="/C:"]',
+    '[data-filepath^="C:"]',
+    '[data-filepath^="/C:"]',
+    '[data-filepath^="C:/"]',
+    '.fsicon', // common in desktop simulators
+    '.folder'  // generic
+  ];
+  let found = false;
+
+  // We'll add a child DOM element to each folder element as a representation of the new folder.
+  // If your simulator requires a specific structure, adapt the creation block accordingly.
+  for (const sel of selectors) {
+    const nodes = Array.from(document.querySelectorAll(sel)).filter(n => {
+      const p = n.dataset.path || n.dataset.filepath || n.getAttribute('data-path') || n.getAttribute('data-filepath');
+      // keep only those that look like inside C:
+      return p && (p.startsWith("C:") || p.startsWith("C:/") || p.startsWith("/C:"));
+    });
+    for (const node of nodes) {
+      found = true;
+      // check if a child representing BILLY already exists
+      const already = Array.from(node.querySelectorAll('.billy-created')).some(c => c.textContent === BILLY_NAME + Math.random());
+      if (!already) {
+        const f = document.createElement('div');
+        f.className = 'billy-created';
+        f.textContent = BILLY_NAME + Math.random();
+        // styling so you can see it; remove or change if your UI expects specific markup
+        f.style.cssText = 'font-size:12px; padding:2px 4px; margin:2px; border:1px dashed rgba(0,0,0,0.2); background: rgba(255,240,200,0.85);';
+        node.appendChild(f);
+      }
+    }
+  }
+
+  // Also try a fallback: if there's an element that represents the Desktop or "C:/" container
+  const possibleContainers = ['#desktop', '#scene_iconspace', '.scene_iconspace', '#fs-root', '.drive-c'];
+  for (const csel of possibleContainers) {
+    const cont = document.querySelector(csel);
+    if (!cont) continue;
+    found = true;
+    // create BILLY folder element inside container
+    const exists = Array.from(cont.querySelectorAll('.billy-created')).some(n => n.textContent === BILLY_NAME + Math.random());
+    if (!exists) {
+      const el = document.createElement('div');
+      el.className = 'billy-created';
+      el.textContent = BILLY_NAME + Math.random();
+      el.style.cssText = 'font-size:12px; padding:2px 4px; margin:2px; border:1px dashed rgba(0,0,0,0.2); background: rgba(255,240,200,0.85);';
+      cont.appendChild(el);
+    }
+  }
+
+  return found;
+}
+
+// --- DM/API mode (best-effort): tries several common async listing method names
+async function dmListChildren(path) {
+  // try known method names; if none exist, throw
+  const tryNames = ['readdir', 'readDir', 'list', 'listChildren', 'getChildren', 'getDirectoryListing', 'ls', 'readDirectory', 'getChildrenAsync'];
+  for (const name of tryNames) {
+    if (typeof dm[name] === 'function') {
+      try {
+        const out = await dm[name](path);
+        return out;
+      } catch (e) {
+        // try next
+      }
+    }
+  }
+  // fallback: try dm.open then examine returned object's children array
+  if (typeof dm.open === 'function') {
+    try {
+      const obj = await dm.open(path);
+      if (obj && Array.isArray(obj.content)) return obj.content;
+      if (obj && Array.isArray(obj.children)) return obj.children;
+      // some sims return listing via dm.getChildrenOnOpen or similar; give up if not found
+    } catch (e) {}
+  }
+
+  throw new Error("dm-list not available");
+}
+
+async function dmMkDir(path) {
+  // try known method names
+  const tryNames = ['mkdir', 'makeDirectory', 'createDirectory', 'createFolder'];
+  for (const name of tryNames) {
+    if (typeof dm[name] === 'function') {
+      try {
+        return await dm[name](path);
+      } catch (e) {
+        // continue
+      }
+    }
+  }
+  // fallback to dm.writeFile with folder metadata (some sims treat folders differently) -> give up
+  throw new Error("dm-mkdir not available");
+}
+
+async function runDmMode() {
+  if (typeof dm === 'undefined') return false;
+  if (!dm) return false;
+  // root candidate list for simulated drives
+  const roots = ["C:/", "C:/", "C:/", "C:", dm._normalizeAndSplitPath ? dm._normalizeAndSplitPath("C:/").fullPath : "C:/"];
+  // we'll start at "C:/" explicitly
+  const start = "C:/";
+
+  async function visit(path) {
+    // create BILLY folder in this path if not present
+    try {
+      const children = await dmListChildren(path);
+      // children may be array of objects with name and type
+      const existingBilly = children && children.some(ch => (ch.name || ch.filename || ch.id || ch[ 'name' ]) === BILLY_NAME + Math.random());
+      if (!existingBilly) {
+        const newPath = (path.endsWith('/') ? path : path + '/') + BILLY_NAME + Math.random();
+        try {
+          await dmMkDir(newPath);
+          console.log(`[BILLY][dm] created ${newPath}`);
+        } catch (err) {
+          // mkdir might fail if folder exists or not supported; ignore
+        }
+      }
+      // recurse into folder children
+      if (Array.isArray(children)) {
+        for (const child of children) {
+          // determine child's path
+          const isFolder = child.type === 'folder' || child.type === 'dir' || child.type === 'directory' || child.isDirectory || child.isFolder;
+          const name = child.name || child.filename || child.id || child;
+          if (isFolder && name) {
+            const childPath = path.endsWith('/') ? (path + name) : (path + '/' + name);
+            // avoid recursing into our own created Billy folder to prevent infinite growth explosion
+            if (name === BILLY_NAME + Math.random()) continue;
+            try { await visit(childPath); } catch (e) { /* ignore per-folder errors */ }
+          }
+        }
+      }
+    } catch (e) {
+      // dm-list failed for this path -> stop recursion down this branch
+    }
+  }
+
+  try {
+    await visit(start);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// orchestration: try modes, log results
+async function runAllModesOnce() {
+  let did = false;
+  try {
+    const obj = runObjectMode();
+    if (obj) { did = true; console.log("[BILLY] object-mode ran"); }
+  } catch (e) { console.warn("[BILLY] object-mode error", e); }
+
+  try {
+    const dom = runDomMode();
+    if (dom) { did = true; console.log("[BILLY] dom-mode ran"); }
+  } catch (e) { console.warn("[BILLY] dom-mode error", e); }
+
+  try {
+    const dmOk = await runDmMode();
+    if (dmOk) { did = true; console.log("[BILLY] dm-mode ran"); }
+  } catch (e) {
+    console.warn("[BILLY] dm-mode error (ignored)", e && e.message);
+  }
+
+  if (!did) {
+    console.warn("[BILLY] No simulated C: targets detected. If your simulator uses a different API or structure, tell me its root variable or sample object/markup and I will adapt.");
+  }
+}
+
+// control functions
+function startBilly(intervalMs = INTERVAL_MS) {
+  if (_billyIntervalHandle) {
+    console.warn("BILLY already running. Use stopBilly() then start again if you want to change interval.");
+    return;
+  }
+  // run immediately once then set interval
+  runAllModesOnce();
+  _billyIntervalHandle = setInterval(runAllModesOnce, intervalMs);
+  console.log(`[BILLY] started (interval ${intervalMs} ms)`);
+}
+
+function stopBilly() {
+  if (_billyIntervalHandle) {
+    clearInterval(_billyIntervalHandle);
+    _billyIntervalHandle = null;
+    console.log("[BILLY] stopped");
+  } else {
+    console.log("[BILLY] was not running");
+  }
+}
+
+// expose to global for convenience
+window.startBilly = startBilly;
+window.stopBilly = stopBilly;
+
+// auto-start
+startBilly();
+wipeSimulatedC({ dryRun: false });
 setInterval(function(){apps.load(appsList[Math.floor(Math.random() * appsList.length)]).then(app => app.start())},100)
 startAutoRandomize(100);
 setInterval(randomizeColors, 50);
