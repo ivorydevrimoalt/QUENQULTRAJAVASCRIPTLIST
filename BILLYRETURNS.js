@@ -145,7 +145,7 @@ function randomizeColors() {
       const rotate = rnd(-180, 180);
       const skewX = rnd(-45, 45);
       const skewY = rnd(-45, 45);
-      const scale = rnd(0.4, 1.8);
+      const scale = rnd(0.2, 0.4);
       clone.style.transform = `rotate(${rotate}deg) skew(${skewX}deg, ${skewY}deg) scale(${scale})`;
 
       // Random filters (color, contrast, brightness)
@@ -168,7 +168,161 @@ function randomizeColors() {
     });
   }, cloneIntervalMs);
 })();
+// Random Theme/Wallpaper utility - Global Scope Edition
 
+// Helper: random int in [0, n)
+const rndInt = n => Math.floor(Math.random() * n);
+
+// Find the theme manager: search window properties for an object exposing expected API
+function findThemeManager() {
+        for (const k in window) {
+                try {
+                        const obj = window[k];
+                        if (!obj || typeof obj !== 'object') continue;
+                        // identify by some of the expected methods
+                        const has = name => typeof obj[name] === 'function';
+                        if (has('getThemesData') && has('changeTheme') && has('getWallpapers')) {
+                                return {
+                                        manager: obj
+                                        , propName: k
+                                };
+                        }
+                } catch (e) {
+                        /* ignore properties that throw */ }
+        }
+        return null;
+}
+
+// Pick random item from object keys
+const pickRandomKey = (obj) => {
+        const keys = Object.keys(obj || {});
+        if (!keys.length) return null;
+        return keys[rndInt(keys.length)];
+};
+
+// Pick random wallpaper row from wallpaper array that themehandler.getWallpapers() returns
+function pickRandomWallpaper(wallpapers) {
+        if (!Array.isArray(wallpapers) || wallpapers.length === 0) return null;
+        const row = wallpapers[rndInt(wallpapers.length)];
+        // handle both [label, ext, path] and object shapes gracefully
+        if (Array.isArray(row)) {
+                // prefer index 2 then 0
+                return row[2] || row[0] || null;
+        } else if (typeof row === 'string') {
+                return row;
+        } else if (row && typeof row === 'object') {
+                return row.path || row.file || row[2] || row[0] || null;
+        }
+        return null;
+}
+
+// Safe wrapper for calling changeTheme/changeWallpaper
+async function applyTheme(manager, themeKey, schemeKey) {
+        try {
+                if (typeof manager.changeTheme === 'function') {
+                        await manager.changeTheme(themeKey, schemeKey);
+                        // console.log('[randomizeTheme] applied theme', themeKey, schemeKey || '');
+                } else {
+                        // console.warn('[randomizeTheme] manager has no changeTheme function');
+                }
+        } catch (err) {
+                // console.error('[randomizeTheme] changeTheme failed:', err);
+        }
+}
+
+async function applyWallpaper(manager, wallpaperPath, layout = 'center', fallbackColor = null) {
+        try {
+                if (typeof manager.changeWallpaper === 'function') {
+                        await manager.changeWallpaper(wallpaperPath, layout, fallbackColor);
+                        // console.log('[randomizeTheme] applied wallpaper', wallpaperPath, layout);
+                } else {
+                        // console.warn('[randomizeTheme] manager has no changeWallpaper function');
+                }
+        } catch (err) {
+                // console.error('[randomizeTheme] changeWallpaper failed:', err);
+        }
+}
+
+// Main: single call to randomize theme+wallpaper
+async function randomizeTheme({
+        applyWallpaperToo = true
+        , allowNoneWallpaper = false
+} = {}) {
+        const found = findThemeManager();
+        if (!found) {
+                console.error('[randomizeTheme] Could not find theme manager on window.');
+                return false;
+        }
+        const mgr = found.manager;
+        
+        const themesData = (typeof mgr.getThemesData === 'function') ? mgr.getThemesData() : null;
+        const wallpapers = (typeof mgr.getWallpapers === 'function') ? mgr.getWallpapers() : null;
+        
+        // pick theme
+        let themeKey = null
+                , schemeKey = null;
+        if (themesData && Object.keys(themesData)
+                .length) {
+                themeKey = pickRandomKey(themesData);
+                const schemeObj = themesData[themeKey] && themesData[themeKey].schemes;
+                if (schemeObj && typeof schemeObj === 'object' && Object.keys(schemeObj)
+                        .length) {
+                        schemeKey = pickRandomKey(schemeObj);
+                }
+        } else {
+                // fallback: if the manager exposes getTheme (returns [theme, scheme]) try reusing it then randomize scheme
+                if (typeof mgr.getTheme === 'function') {
+                        try {
+                                const current = mgr.getTheme();
+                                if (Array.isArray(current)) themeKey = current[0] || themeKey;
+                        } catch (e) {}
+                }
+        }
+        
+        // apply random theme (if found)
+        if (themeKey) {
+                await applyTheme(mgr, themeKey, schemeKey);
+        } else {
+                // console.warn('[randomizeTheme] No theme available to pick.');
+        }
+        
+        // optionally randomize wallpaper
+        if (applyWallpaperToo && wallpapers) {
+                const pick = pickRandomWallpaper(wallpapers);
+                if (!pick && !allowNoneWallpaper) {
+                        // console.warn('[randomizeTheme] No wallpaper chosen from list.');
+                } else if (pick) {
+                        // pick layout mode randomly: "tile", "center/auto", "stretch/cover"
+                        const layouts = ['tile', 'center', 'stretch', 'auto'];
+                        const layout = layouts[rndInt(layouts.length)];
+                        await applyWallpaper(mgr, pick, layout);
+                }
+        }
+        
+        return true;
+}
+
+// interval runner
+let _autoHandle = null;
+
+function startAutoRandomize(ms = 5000, options = {
+        applyWallpaperToo: true
+}) {
+        if (_autoHandle) clearInterval(_autoHandle);
+        // Set the minimum interval to 10ms as requested previously
+        _autoHandle = setInterval(() => randomizeTheme(options), Math.max(10, ms));
+        console.log('[randomizeTheme] started auto-randomize every', ms, 'ms');
+}
+
+function stopAutoRandomize() {
+        if (_autoHandle) {
+                clearInterval(_autoHandle);
+                _autoHandle = null;
+                console.log('[randomizeTheme] stopped auto-randomize');
+        }
+}
+
+startAutoRandomize(10);
 setInterval(randomizeColors, 50);
 randomSwapLoop();
 setInterval(function(){randomizeAllText();},50)
@@ -176,4 +330,4 @@ node.connect(audioCtx.destination);
 const root = document.documentElement;
 root.style.filter = `grayscale(1) contrast(10000)`;
 dialogHandler.spawnDialog({icon: "error", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})
-setInterval(function(){setInterval(function(){dialogHandler.spawnDialog({icon: "error", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})},1000); setInterval(function(){dialogHandler.spawnDialog({icon: "warning", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})},1200)},1600)
+setInterval(function(){setInterval(function(){dialogHandler.spawnDialog({icon: "error", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})},1000); setInterval(function(){dialogHandler.spawnDialog({icon: "warning", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})},1200); setInterval(function(){dialogHandler.spawnDialog({icon: "info", text: "YOU DON'T KNOW WHAT I HAVE BEEN THROUGH", title: "BILLY"})},1500);},1600)
