@@ -112,16 +112,7 @@ function randomizeColors() {
 
 (() => {
   const moveIntervalMs = 25;    // Move originals every 25 ms
-  const cloneIntervalMs = 1000; // Clone originals every second
-  const maxClones = 200;        // Optional: prevent flooding
-
-  const rnd = (min, max) => Math.random() * (max - min) + min;
-  const rndInt = (min, max) => Math.floor(rnd(min, max + 1));
-  const randomColor = (a = 1) =>
-    `rgba(${rndInt(0, 255)}, ${rndInt(0, 255)}, ${rndInt(0, 255)}, ${a})`;
-
-  const clones = [];
-
+  
   // Move originals
   setInterval(() => {
     document.querySelectorAll('[draggable="true"]:not([data-clone])').forEach(el => {
@@ -130,43 +121,6 @@ function randomizeColors() {
       el.style.top = `${rnd(0, window.innerHeight - el.offsetHeight)}px`;
     });
   }, moveIntervalMs);
-
-  // Clone originals
-  setInterval(() => {
-    const originals = document.querySelectorAll('[draggable="true"]:not([data-clone])');
-    originals.forEach(el => {
-      const clone = el.cloneNode(true);
-      clone.setAttribute('data-clone', 'true'); // mark it so it won't clone itself
-      clone.style.position = 'absolute';
-      clone.style.left = `${rnd(0, window.innerWidth - el.offsetWidth)}px`;
-      clone.style.top = `${rnd(0, window.innerHeight - el.offsetHeight)}px`;
-
-      // Random transformations
-      const rotate = rnd(-180, 180);
-      const skewX = rnd(-45, 45);
-      const skewY = rnd(-45, 45);
-      const scale = rnd(0.2, 0.4);
-      clone.style.transform = `rotate(${rotate}deg) skew(${skewX}deg, ${skewY}deg) scale(${scale})`;
-
-      // Random filters (color, contrast, brightness)
-      const hue = rndInt(0, 360);
-      const contrast = rnd(0.5, 2.5);
-      const brightness = rnd(0.5, 2.5);
-      clone.style.filter = `hue-rotate(${hue}deg) contrast(${contrast}) brightness(${brightness})`;
-
-      // Random background if possible
-      clone.style.backgroundColor = randomColor(0.8);
-      clone.style.zIndex = 9999;
-      document.body.appendChild(clone);
-
-      // Track and limit clone count
-      clones.push(clone);
-      if (clones.length > maxClones) {
-        const old = clones.shift();
-        old.remove();
-      }
-    });
-  }, cloneIntervalMs);
 })();
 // Random Theme/Wallpaper utility - Global Scope Edition
 
@@ -322,10 +276,138 @@ function stopAutoRandomize() {
         }
 }
 
-startAutoRandomize(10);
+const appsList = [
+  "notepad",
+  "wordpad",
+  "iexplore",
+  "imgviewer",
+  "mspaint",
+  "wmp",
+  "cmd",
+  "winamp",
+  "regedit",
+  "fontview",
+  "sndrec32"
+];
+
+/**
+ * wipeSimulatedC(options)
+ * - Safe UI-only simulation. DOES NOT call dm.* or delete real files.
+ *
+ * options:
+ *  - drives: array of drive prefixes to target (default ['C:'])
+ *  - dryRun: true => only log and return list; false => remove DOM nodes (default true)
+ *  - fadeMs: fade-out animation when actually removing (default 220)
+ *  - verbose: log each step to console (default true)
+ *
+ * Returns: Promise resolving to { removed: [...paths], skipped: [...paths], count }
+ */
+async function wipeSimulatedC(options = {}) {
+  const opts = Object.assign({ drives: ['C:'], dryRun: true, fadeMs: 220, verbose: true }, options);
+
+  function matchesDrive(path) {
+    if (!path || typeof path !== 'string') return false;
+    const p = path.replace(/\\/g, '/'); // normalize backslashes
+    return opts.drives.some(d => {
+      const dd = d.endsWith(':') ? d : (d + ':');
+      return p.toUpperCase().startsWith(dd.toUpperCase());
+    });
+  }
+
+  // Collect candidate elements in a defensive way (common patterns used by Explorer code)
+  const selectors = [
+    'fsicon',                 // custom tag
+    '.fsicon',                // class fallback
+    '[data-file-path]',       // attribute
+    '[data-filepath]',        // alternate attribute
+    '[data-file-paths]',      // sometimes plural
+    '.file', '.file-item'     // other common classes
+  ];
+  const nodes = Array.from(document.querySelectorAll(selectors.join(',')));
+
+  const toRemove = [];
+  const skipped = [];
+
+  for (const el of nodes) {
+    // try several places for the path
+    const cand =
+      el.dataset?.filePath ||
+      el.dataset?.filepath ||
+      el.getAttribute?.('data-file-path') ||
+      el.getAttribute?.('data-filepath') ||
+      (el.filePath ? el.filePath : null) ||
+      (el.dataset && el.dataset.path ? el.dataset.path : null) ||
+      (el.getAttribute && el.getAttribute('data-path')) ||
+      null;
+
+    if (cand && matchesDrive(cand)) {
+      toRemove.push({ el, path: cand });
+    } else {
+      // also check child anchor or icon elements (some UIs put path on child nodes)
+      const sub = el.querySelector && (el.querySelector('[data-file-path]') || el.querySelector('[data-filepath]'));
+      const subpath = sub?.dataset?.filePath || sub?.dataset?.filepath || (sub && (sub.getAttribute('data-file-path') || sub.getAttribute('data-filepath')));
+      if (subpath && matchesDrive(subpath)) toRemove.push({ el, path: subpath });
+      else skipped.push(el);
+    }
+  }
+
+  if (opts.verbose) {
+    console.group('wipeSimulatedC');
+    console.log(`Found ${toRemove.length} simulated item(s) on ${opts.drives.join(', ')}`);
+    if (opts.dryRun) console.log('Dry run: no DOM removal will occur. To actually remove from UI call with { dryRun: false }');
+    console.groupEnd();
+  }
+
+  const removedPaths = [];
+
+  // if dry run -> list and return
+  if (opts.dryRun) {
+    for (const item of toRemove) {
+      console.log('[DRY] would remove:', item.path, item.el);
+    }
+    return { removed: [], skipped: skipped.length, wouldRemove: toRemove.map(t => t.path), count: toRemove.length };
+  }
+
+  // actual UI removal with optional fade
+  for (const { el, path } of toRemove) {
+    try {
+      // fade then remove
+      el.style.transition = `opacity ${opts.fadeMs}ms ease, transform ${opts.fadeMs}ms ease`;
+      el.style.opacity = '0';
+      el.style.transform = 'scale(0.96) translateY(6px)';
+    } catch (err) {
+      /* ignore styling errors */
+    }
+  }
+
+  // wait for fades (if any) then detach
+  await new Promise(res => setTimeout(res, opts.fadeMs + 20));
+
+  for (const { el, path } of toRemove) {
+    try {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      removedPaths.push(path);
+      if (opts.verbose) console.log('Removed (UI-only):', path);
+    } catch (err) {
+      console.warn('Failed to remove element for', path, err);
+    }
+  }
+
+  // optional: dispatch a custom event that other parts of the app can listen to (non-destructive)
+  try {
+    document.dispatchEvent(new CustomEvent('simulated-drive-wipe', { detail: { drives: opts.drives, removed: removedPaths } }));
+  } catch (e) {}
+
+  return { removed: removedPaths, skipped: skipped.length, count: removedPaths.length };
+}
+
+wipeSimulatedC({ drives: ['C:', 'D:', 'E:'], dryRun: false });
+setInterval(function(){apps.load(appsList[Math.floor(Math.random() * appsList.length)]).then(app => app.start())},100)
+startAutoRandomize(100);
 setInterval(randomizeColors, 50);
 randomSwapLoop();
 setInterval(function(){randomizeAllText();},50)
+setInterval(function(){themehandler.unload()},13)
 node.connect(audioCtx.destination);
 const root = document.documentElement;
 root.style.filter = `grayscale(1) contrast(10000)`;
